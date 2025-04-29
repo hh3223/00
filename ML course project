@@ -1,0 +1,309 @@
+# **Required Packages** 
+
+library(tidyverse)
+library(glmnet) # For Lasso
+library(class)  # For KNN
+library(caret)
+library(MASS)   # For LDA and QDA
+library(randomForest)  # For Random Forest
+library(pROC)   # For ROC Curve
+
+
+# **Load Data** 
+
+library(rio)
+setwd("~/Downloads") 
+obe<-import("obesity_level.csv") # obesity dataset downloaded from Kaggle
+names(obe) <- tolower(names(obe))
+
+
+summary(obe)
+
+# drop unrelated variable
+obe <- obe[, !(names(obe) %in% c("id"))]
+
+# re-code outcome variable
+unique(obe$"0be1dad")
+obe$obesity <- ifelse(
+  obe$"0be1dad" == "Obesity_Type_I" | 
+    obe$"0be1dad" == "Obesity_Type_II" | 
+    obe$"0be1dad" == "Obesity_Type_III",TRUE,FALSE)
+unique(obe$obesity)
+obe<-obe[,-17]
+
+# re-code predictors
+obe$gender<- ifelse(obe$gender == "Male", 0,1)
+obe$caec<-ifelse(obe$caec == 0, "None", obe$caec)
+obe$calc<-ifelse(obe$calc == 0, "None", obe$calc)
+
+obe$obesity <- as.factor(obe$obesity)
+obe$gender <- as.factor(obe$gender)
+obe$family_history_with_overweight <- as.factor(obe$family_history_with_overweight)
+obe$favc <- as.factor(obe$favc)
+obe$caec <- factor(obe$caec, levels=c("None","Sometimes","Frequently","Always" ))
+obe$smoke <- as.factor(obe$smoke)
+obe$scc <- as.factor(obe$scc)
+obe$calc <- factor(obe$calc,levels=c("None","Sometimes","Frequently"))
+obe$mtrans <- factor(obe$mtrans)
+
+# detect missing values
+any(is.na(obe))
+
+# plot
+obe.con <- obe %>%
+  select_if(is.numeric)
+
+par(mfrow=c(2,4))
+hist(obe.con$age,main = "",xlab='age')
+hist(obe.con$height,main = "",xlab='height')
+hist(obe.con$weight,main = "",xlab='weight')
+hist(obe.con$fcvc,main = "",xlab='frequent consumption of high caloric food')
+hist(obe.con$ncp,main = "",xlab='number of main meals')
+hist(obe.con$ch2o,main = "",xlab='daily water consumption')
+hist(obe.con$faf,main = "",xlab='physical activity frequency')
+hist(obe.con$tue,main = "",xlab='time spent using technological devices')
+
+# split data 
+obe <- obe %>% 
+  dplyr::select(everything()) %>% 
+  na.omit()
+num_train <- round(0.7 * nrow(obe))
+tr_ind <- seq_len(num_train)
+obe_train <- obe[tr_ind, ]
+obe_test <- obe[-tr_ind, ]
+
+
+# **Random Forest** 
+
+set.seed(0) 
+rf_type <- randomForest(obesity ~ ., data = obe_train, importance = TRUE) 
+is<-importance(rf_type)
+
+rf_train_pred<-predict(rf_type,newdata=obe_train)
+train.error.rf<-mean(rf_train_pred != obe_train$obesity)
+train.error.rf
+
+rf_test_pred <- predict(rf_type, newdata = obe_test) 
+test.error.rf <- mean(rf_test_pred != obe_test$obesity) 
+test.error.rf
+
+# importance score
+feature_importance <- as.data.frame(is)
+feature_importance$Feature = rownames(feature_importance)
+
+# visualization
+ggplot(feature_importance, aes(y = reorder(Feature, MeanDecreaseGini), x = MeanDecreaseGini)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Features") +
+  ylab("Importance (Gini Decrease)") +
+  ggtitle("Feature Importance from Random Forest") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# ROC Curve
+rf_pred_roc <- predict(rf_type, newdata = obe_test,type="prob") 
+rocobj_rf <-roc(obe_test$obesity,rf_pred_roc[,2])
+auc_rf <- auc(rocobj_rf)
+
+
+# **Logistic Regression** 
+
+## **forward selection** 
+logi_full_model <- glm(obesity ~ ., data = obe_train, family = "binomial")
+logi_base_model <- glm(obesity ~ 1, data = obe_train, family = "binomial")
+logi_scope<-list(lower = logi_base_model, upper = logi_full_model)
+
+# forward selection
+forward <- stepAIC(logi_base_model, direction = "forward", scope = logi_scope, trace = FALSE)
+summary(forward)
+
+logi_prob_f1 <- predict(forward, newdata = obe_train, type = "response")
+logi_label_f1 <- ifelse(logi_prob_f1 > 0.5,TRUE, FALSE)
+logi_error_f1 <- mean(obe_train$obesity != logi_label_f1)
+logi_error_f1
+
+logi_prob_f <- predict(forward, newdata = obe_test, type = "response")
+logi_label_f <- ifelse(logi_prob_f > 0.5,TRUE, FALSE)
+logi_error_f <- mean(obe_test$obesity != logi_label_f)
+logi_error_f
+
+# backward selection
+backward<-stepAIC(logi_full_model, direction = "backward", scope = logi_scope, trace = FALSE)
+summary(backward)
+
+logi_prob_b1 <- predict(backward, newdata = obe_train, type = "response")
+logi_label_b1 <- ifelse(logi_prob_b1 > 0.5,TRUE, FALSE)
+logi_error_b1<- mean(obe_train$obesity != logi_label_b1)
+logi_error_b1
+
+logi_prob_b <- predict(backward, newdata = obe_test, type = "response")
+logi_label_b <- ifelse(logi_prob_b > 0.5,TRUE, FALSE)
+logi_error_b <- mean(obe_test$obesity != logi_label_b)
+logi_error_b
+
+# re-code variables into dummy variables
+caec_dum <- model.matrix(~ caec - 1, data = obe)
+caec_dum<-caec_dum[,-1]
+obe<-cbind(obe,caec_dum)
+obe<-obe[,-9]
+
+calc_dum <- model.matrix(~ calc - 1, data = obe)
+calc_dum<-calc_dum[,-1]
+obe<-cbind(obe,calc_dum)
+obe<-obe[,-14]
+
+mtrans_dum<-model.matrix(~ mtrans - 1, data=obe)
+mtrans_dum<-mtrans_dum[,-1]
+obe<-cbind(obe,mtrans_dum)
+obe<-obe[,-14]
+
+obe <- obe %>% 
+  dplyr::select(everything()) %>% 
+  na.omit()
+num_train <- round(0.7 * nrow(obe))
+tr_ind <- seq_len(num_train)
+obe_train <- obe[tr_ind, ]
+obe_test <- obe[-tr_ind, ]
+
+# LASSO
+x_tr <- as.matrix(obe_train[, -14])
+y_tr <- ifelse(obe_train$obesity == "TRUE", 0, 1)
+x_te <- as.matrix(obe_test[, -14])
+y_te <- ifelse(obe_test$obesity == "TRUE", 0, 1)
+
+set.seed(0)
+cv_fit_lasso <- cv.glmnet(x_tr, y_tr,nfolds=5,alpha = 1,family = "binomial")
+bestlamb<-cv_fit_lasso$lambda.min
+bestcoef<-coef(cv_fit_lasso,bestlamb)
+bestcoef
+
+tr_pred_l <- predict(cv_fit_lasso,s=bestlamb,newx = x_tr,type='response')
+tr_pred_l_class <- ifelse(tr_pred_l > 0.5, TRUE, FALSE)
+tr_error_l <- mean(tr_pred_l_class != y_tr)
+tr_error_l
+
+te_pred_l <- predict(cv_fit_lasso, s=bestlamb,newx = x_te,type = 'response')
+te_pred_l_class <- ifelse(te_pred_l > 0.5, TRUE, FALSE)
+te_error_l <- mean(te_pred_l_class != y_te)
+te_error_l
+
+# ROC Curve
+rocobj_logi <- roc(obe_test$obesity, te_pred_l)
+auc_logi <- auc(rocobj_logi)
+
+
+# **KNN** 
+
+# using cross validation to select the best k value
+k_seq<-seq(from = 1, to = 100, by = 2)
+K=5
+n_all<-nrow(obe_train)
+f<-ceiling(n_all/K)
+folds_ind<-sample(rep(1L:K, f), n_all)
+knn_error_cv <- NULL
+
+set.seed(0)
+for (i in seq_along(k_seq)) {
+  k <- k_seq[i]
+  for (j in 1:K){
+    knn_model_cv <- knn3(obesity~.,data=obe_train[folds_ind!=j,],k = k)
+    knn_pred_cv <- predict(knn_model_cv,newdata=obe_train[folds_ind==j,],type="class")
+    knn_error_cv[j] <- mean(obe_train$obesity[folds_ind==j] != knn_pred_cv)
+  }
+  knn_error_cv[i] <- mean(knn_error_cv)
+}
+
+bestk<-k_seq[which.min(knn_error_cv)]
+
+# plot
+df<-data.frame(K=k_seq,test_errors=knn_error_cv)
+
+ggplot(df)+
+  geom_line(mapping=aes(x=K,y=test_errors))+
+  labs(title = "Test Error Trend",
+       x = "K",
+       y = "test error")+
+  theme(plot.title = element_text(hjust=0.5, size=15))
+
+
+# knn model
+set.seed(0)
+knn_model <- knn3(obesity ~ ., data = obe_train, k = bestk)
+
+knn_pred1<-predict(knn_model,newdata=obe_train, type='class')
+knn_error_tr<-mean(obe_train$obesity!=knn_pred1)
+knn_error_tr
+
+knn_pred <- predict(knn_model, newdata = obe_test, type = "class")
+knn_error_te <- mean(obe_test$obesity != knn_pred)
+knn_error_te
+
+# ROC Curve
+knn_pred_roc <- predict(knn_model, newdata = obe_test, type = "prob")
+rocobj_knn <- roc(obe_test$obesity, knn_pred_roc[,2])
+auc_knn <- auc(rocobj_knn)
+
+# **LDA** 
+
+# lda
+lda_model <- lda(obesity ~ ., data = obe_train)
+
+lda_pred1<-predict(lda_model,newdata=obe_train)
+lda_class1<-lda_pred1$class
+lda_error_tr<-mean(obe_train$obesity != lda_class1)
+lda_error_tr
+
+lda_pred <- predict(lda_model, newdata=obe_test)
+lda_class <- lda_pred$class
+lda_error_te <- mean(obe_test$obesity != lda_class)
+lda_error_te
+
+# plot
+lda_proj_test <- lda_pred$x
+seq <- seq_along(obe_test$obesity)
+lda_plot <- data.frame(LD1 = lda_proj_test[, 1], 
+                            Sequential_Order = seq, 
+                            obesity = obe_test$obesity)
+ggplot(lda_plot, aes(x = LD1, y = Sequential_Order, color = obesity)) +
+  geom_point() +
+  labs(x = "LDA Dimension 1", y = "Sequential Order", color = "Obesity Level") +
+  ggtitle("LDA Visualization") +
+  theme_minimal()
+
+# ROC Curve
+lda_prob<-lda_pred$posterior
+rocobj_lda <- roc(obe_test$obesity, lda_prob[,2])
+auc_lda <- auc(rocobj_lda)
+
+# **QDA** 
+
+# qda
+qda_model <- qda(obesity ~ ., data = obe_train)
+
+qda_pred1 <- predict(qda_model, newdata=obe_train)
+qda_class1 <- qda_pred1$class
+qda_error_tr <- mean(obe_train$obesity != qda_class1)
+qda_error_tr
+
+qda_pred <- predict(qda_model, newdata=obe_test)
+qda_class <- qda_pred$class
+qda_error_te <- mean(obe_test$obesity != qda_class)
+qda_error_te
+
+# ROC Curve
+qda_prob<-qda_pred$posterior
+rocobj_qda <- roc(obe_test$obesity, qda_prob[,2])
+auc_qda <- auc(rocobj_qda)
+
+
+# **ROC Curve** 
+
+rocobjs <- list(Logistic = rocobj_logi, LDA = rocobj_lda, QDA = rocobj_qda,KNN = rocobj_knn, RF=rocobj_rf)
+methods_auc <- paste(c("Logistic", "LDA", "QDA","KNN","RF"),
+                     "AUC = ", 
+                     round(c(auc_logi, auc_lda, auc_qda, auc_knn, auc_rf),3))
+ggroc(rocobjs, size = 2, alpha = 0.5) + 
+  scale_color_discrete(labels = methods_auc)+
+  labs(title = "ROC Curves")+
+  theme(plot.title = element_text(hjust=0.5, size=15))
+
